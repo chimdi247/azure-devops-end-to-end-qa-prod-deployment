@@ -62,7 +62,7 @@ stages:
       dependsOn: Pull_Image
       steps:
         - script: |
-            git clone -b master https://$(System.AccessToken)@dev.azure.com/devopsshack-Batch/DevOps-Batch/_git/DevOps-Batch cloned-repo
+            git clone -b main https://$(System.AccessToken)@dev.azure.com/teamraphael691/python-docker-app/_git/azure-devops-end-to-end-qa-prod-deployment.git cloned-repo
 
             # Update PROD deployment image tags
             sed -i "s|votingacr123.azurecr.io/vote:.*|votingacr123.azurecr.io/vote:prod-$(Build.BuildId)|g" cloned-repo/k8s-yamls/prod-app_and_db/vote-deployment.yaml
@@ -70,11 +70,11 @@ stages:
             sed -i "s|votingacr123.azurecr.io/worker:.*|votingacr123.azurecr.io/worker:prod-$(Build.BuildId)|g" cloned-repo/k8s-yamls/prod-app_and_db/worker-deployment.yaml
 
             cd cloned-repo
-            git config user.email "azure-bot@devopsshack.com"
+            git config user.email "azure-bot@teamraphael691.com"
             git config user.name "Azure DevOps Pipeline"
             git add k8s-yamls/
             git commit -m "ci: update PROD tag to prod-$(Build.BuildId) [skip ci]"
-            git push origin master
+            git push origin main
           displayName: 'Inject PROD tags and push to Prod'
           env:
             SYSTEM_ACCESSTOKEN: $(System.AccessToken)
