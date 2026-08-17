@@ -15,5 +15,5 @@ spec:
         app: worker
     spec:
       containers:
-      - image: votingacr123.azurecr.io/worker:40
+      - image: votingacr123.azurecr.io/worker:137
         name: worker
