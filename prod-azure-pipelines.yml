@@ -1,0 +1,125 @@
+trigger:
+- none
+
+variables:
+  imageTag: $(Build.BuildId)
+
+pool:
+  name: 'chimdi-pool'
+  demands:
+    - Agent.Name -equals agent-1
+
+stages:
+- stage: Pull_Image_And_ReTag
+  displayName: 'Pull Image and ReTag for PROD'
+  jobs:
+
+    - job: Pull_Image
+      displayName: 'Pull QA Image and Push as PROD'
+      steps:
+        - checkout: self
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            command: 'login'
+          displayName: 'Login to ACR'
+
+        - script: |
+            docker pull votingacr123.azurecr.io/result:latest
+            docker pull votingacr123.azurecr.io/vote:latest
+            docker pull votingacr123.azurecr.io/worker:latest
+            docker tag votingacr123.azurecr.io/result:latest votingacr123.azurecr.io/result:prod-$(Build.BuildId)
+            docker tag votingacr123.azurecr.io/vote:latest votingacr123.azurecr.io/vote:prod-$(Build.BuildId)
+            docker tag votingacr123.azurecr.io/worker:latest votingacr123.azurecr.io/worker:prod-$(Build.BuildId)
+          displayName: 'Pull and Tag Images'
+
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            repository: 'vote'
+            command: 'push'
+            tags: 'prod-$(Build.BuildId)'
+          displayName: 'Push Vote Image'
+
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            repository: 'result'
+            command: 'push'
+            tags: 'prod-$(Build.BuildId)'
+          displayName: 'Push Result Image'
+
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            repository: 'worker'
+            command: 'push'
+            tags: 'prod-$(Build.BuildId)'
+          displayName: 'Push Worker Image'
+
+    - job: update_images_in_deployments
+      displayName: 'Update Images'
+      dependsOn: Pull_Image
+      steps:
+        - script: |
+            git clone -b master https://$(System.AccessToken)@dev.azure.com/devopsshack-Batch/DevOps-Batch/_git/DevOps-Batch cloned-repo
+
+            # Update PROD deployment image tags
+            sed -i "s|votingacr123.azurecr.io/vote:.*|votingacr123.azurecr.io/vote:prod-$(Build.BuildId)|g" cloned-repo/k8s-yamls/prod-app_and_db/vote-deployment.yaml
+            sed -i "s|votingacr123.azurecr.io/result:.*|votingacr123.azurecr.io/result:prod-$(Build.BuildId)|g" cloned-repo/k8s-yamls/prod-app_and_db/result-deployment.yaml
+            sed -i "s|votingacr123.azurecr.io/worker:.*|votingacr123.azurecr.io/worker:prod-$(Build.BuildId)|g" cloned-repo/k8s-yamls/prod-app_and_db/worker-deployment.yaml
+
+            cd cloned-repo
+            git config user.email "azure-bot@devopsshack.com"
+            git config user.name "Azure DevOps Pipeline"
+            git add k8s-yamls/
+            git commit -m "ci: update PROD tag to prod-$(Build.BuildId) [skip ci]"
+            git push origin master
+          displayName: 'Inject PROD tags and push to Prod'
+          env:
+            SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+    - job: docker_images_cleanup
+      displayName: 'Image Cleanup'
+      dependsOn: update_images_in_deployments
+      steps:
+        - script: |
+            for IMAGE in vote result worker; do
+              echo "Cleaning old PROD tags for $IMAGE..."
+              docker images "votingacr123.azurecr.io/$IMAGE" --format "{{.Tag}}" | \
+                grep "^prod-" | \
+                sort -t'-' -k2 -n | \
+                head -n -3 | \
+                xargs -I {} docker rmi "votingacr123.azurecr.io/$IMAGE:{}" || true
+            done
+          displayName: 'Cleanup old PROD images - keep last 3 tags'
+
+- stage: kubernetes_deploy_to_prod
+  displayName: 'Deploy To PROD Kubernetes'
+  dependsOn: Pull_Image_And_ReTag
+  jobs:
+
+    - job: deploy_apps_and_databases
+      displayName: 'Deploy Apps & Databases'
+      steps:
+        - task: KubernetesManifest@1
+          inputs:
+            action: 'deploy'
+            connectionType: 'kubernetesServiceConnection'
+            kubernetesServiceConnection: 'aks-prod-sc'
+            namespace: 'prod'
+            manifests: 'k8s-yamls/prod-app_and_db/*.yaml'
+          displayName: 'Deploy Apps to PROD'
+
+    - job: deploy_ingress
+      displayName: 'Deploy Ingress'
+      dependsOn: deploy_apps_and_databases
+      steps:
+        - task: KubernetesManifest@1
+          inputs:
+            action: 'deploy'
+            connectionType: 'kubernetesServiceConnection'
+            kubernetesServiceConnection: 'aks-prod-sc'
+            namespace: 'prod'
+            manifests: 'k8s-yamls/prod-ingresses/*.yaml'
+          displayName: 'Deploy Ingress to PROD'

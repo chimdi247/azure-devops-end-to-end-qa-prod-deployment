@@ -1,0 +1,400 @@
+
+
+trigger:
+- none
+
+variables:
+  imageTag: $(Build.BuildId)
+
+pool:
+  name: 'chimdi-pool'
+  demands:
+    - Agent.Name -equals agent-1
+
+stages:
+- stage: SecurityScan
+  displayName: 'Security Scan Stage'
+  jobs:
+
+    - job: gitleaks_scan
+      displayName: 'Gitleaks - Secret Scan'
+      steps:
+        - checkout: self
+          fetchDepth: 0
+        - script: |
+            docker pull zricethezav/gitleaks:latest
+            docker run --rm \
+              -v $(Build.SourcesDirectory):/path \
+              zricethezav/gitleaks:latest detect \
+              --source /path \
+              --report-format json \
+              --report-path /path/gitleaks-report.json \
+              --exit-code 1
+          displayName: 'Gitleaks Scan steps'
+
+        - script: |
+            cp $(Build.SourcesDirectory)/gitleaks-report.json $(Build.ArtifactStagingDirectory)/gitleaks-report.json
+          displayName: 'Copy Report to Staging'
+          condition: always()
+
+        - task: PublishBuildArtifacts@1
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)/gitleaks-report.json'
+            ArtifactName: 'gitleaks-report'
+            publishLocation: 'Container'
+
+    - job: checkov_terraform
+      displayName: 'Checkov - Terraform Scan'
+      dependsOn: gitleaks_scan
+      steps:
+        - checkout: self
+        - script: |
+                sudo apt-get install -y pipx
+                pipx install checkov --force
+          displayName: 'Install Checkov'
+        - script: |
+             ~/.local/bin/checkov --version
+             ~/.local/bin/checkov -d . --framework terraform \
+             --output json \
+             --output-file-path $(Build.ArtifactStagingDirectory) \
+             --soft-fail
+          displayName: 'Run Checkov on Terraform'
+        - task: PublishBuildArtifacts@1
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+            ArtifactName: 'Checkov-Terraform'
+            publishLocation: 'Container'
+          displayName: ' Checkov Terraform Report'
+
+    - job: checkov_kubernetes
+      displayName: 'Checkov - Kubernetes Scan'
+      dependsOn: checkov_terraform
+      steps:
+        - checkout: self
+        - script: |
+             ~/.local/bin/checkov --version
+             ~/.local/bin/checkov -d . --framework kubernetes \
+             --output json \
+             --output-file-path $(Build.ArtifactStagingDirectory) \
+             --soft-fail
+          displayName: 'Run Checkov on Kubernetes'
+        - task: PublishBuildArtifacts@1
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+            ArtifactName: 'Checkov-kubernetes'
+            publishLocation: 'Container'
+          displayName: ' Checkov kubernetes Report'
+
+    - job: checkov_docker
+      displayName: 'Checkov - Docker Scan'
+      dependsOn: checkov_kubernetes
+      steps:
+        - checkout: self
+        - script: |
+             ~/.local/bin/checkov --version
+             ~/.local/bin/checkov -d . --framework dockerfile \
+             --output json \
+             --output-file-path $(Build.ArtifactStagingDirectory) \
+             --soft-fail
+          displayName: 'Run Checkov on dockerfile'
+        - task: PublishBuildArtifacts@1
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+            ArtifactName: 'Checkov-docker'
+            publishLocation: 'Container'
+          displayName: ' Checkov docker Report'
+
+    - job: trivy_fs_scan
+      displayName: 'Trivy - Filesystem Scan'
+      dependsOn: checkov_docker
+      steps:
+        - script: |
+            sudo apt-get install -y wget apt-transport-https gnupg
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+            echo "deb https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update -y
+            sudo apt-get install -y trivy
+          displayName: 'Install Trivy'
+        - script: |
+            trivy --version
+            trivy fs . \
+              --format json \
+              --output $(Build.ArtifactStagingDirectory)/trivy-fs-report.json \
+              --exit-code 0
+          displayName: 'Run Trivy Filesystem Scan'
+        - task: PublishBuildArtifacts@1
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+            ArtifactName: 'Trivy Fs Report'
+            publishLocation: 'Container'
+          displayName: ' Trivy FS Report'
+
+
+- stage: Test
+  displayName: 'Test Stage'
+  dependsOn: SecurityScan
+  jobs:
+
+    - job: test_vote
+      displayName: 'Vote Unit Tests (Python)'
+      steps:
+        - checkout: self
+
+        - script: |
+            sudo apt-get update -y
+            sudo apt-get install -y python3 python3-pip pipx
+            pipx install pytest
+          displayName: 'Install Python & pytest via pipx'
+
+        - script: |
+            cd vote
+            ~/.local/bin/pytest tests/ -v
+          displayName: 'Run Vote Tests'
+
+    - job: test_result
+      displayName: 'Result Unit Tests (Node.js)'
+      dependsOn: test_vote
+      steps:
+        - checkout: self
+
+        - script: |
+            curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+            node --version
+            npm --version
+          displayName: 'Install Node.js'
+
+        - script: |
+            cd result
+            npm install
+          displayName: 'Install Node Dependencies'
+
+        - script: |
+            cd result
+            npm test
+          displayName: 'Run Result Tests'
+
+    - job: test_worker
+      displayName: 'Worker Unit Tests (C#)'
+      dependsOn: test_result
+      steps:
+        - checkout: self
+
+        - script: |
+            sudo apt-get update -y
+            sudo apt-get install -y dotnet-sdk-8.0
+            dotnet --version
+          displayName: 'Install .NET SDK 8.0'
+
+        - script: |
+            cd worker/Worker.Tests
+            dotnet test --verbosity normal
+          displayName: 'Run Worker Tests'
+
+
+- stage: Sonarqube
+  displayName: 'SonarQube Stage'
+  dependsOn: Test
+  jobs:
+
+    - job: sonarqube_analysis
+      displayName: 'SonarQube Analysis'
+      steps:
+        - checkout: self
+        - task: SonarQubePrepare@8
+          inputs:
+            SonarQube: 'sonar-con'
+            scannerMode: 'cli'
+            configMode: 'manual'
+            cliProjectKey: 'voting-app'
+            cliProjectName: 'voting-app'
+            cliSources: '.'
+
+        - task: SonarQubeAnalyze@8
+          inputs:
+            jdkversion: 'JAVA_HOME_17_X64'
+
+        - task: SonarQubePublish@8
+          inputs:
+            pollingTimeoutSec: '300'
+
+
+
+- stage: Docker_Build_Push
+  displayName: 'Docker Build & Push'
+  dependsOn: Sonarqube
+  jobs:
+
+    - job: Docker_Build
+      displayName: 'Docker_Build_Images'
+      steps:
+        - checkout: self
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            repository: 'vote'
+            command: 'build'
+            Dockerfile: 'vote/Dockerfile'
+            buildContext: 'vote'
+            tags: |
+              $(Build.BuildId)
+              latest
+          displayName: ' Build Vote Image'
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            repository: 'worker'
+            command: 'build'
+            Dockerfile: 'worker/Dockerfile'
+            buildContext: 'worker'
+            tags: |
+              $(Build.BuildId)
+              latest
+          displayName: ' Build Worker Image'
+
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            repository: 'result'
+            command: 'build'
+            Dockerfile: 'result/Dockerfile'
+            buildContext: 'result'
+            tags: |
+              $(Build.BuildId)
+              latest
+          displayName: ' Build Result Image'
+
+
+    - job: trivy_image_scan
+      displayName: 'Trivy - Image Scan'
+      dependsOn: Docker_Build
+      steps:
+        - script: |
+            trivy image votingacr123.azurecr.io/vote:$(imageTag) \
+              --format json \
+              --output $(Build.ArtifactStagingDirectory)/trivy-vote-report.json \
+              --exit-code 0
+          displayName: 'Run Trivy Vote Image Scan'
+
+        - script: |
+            trivy image votingacr123.azurecr.io/result:$(imageTag) \
+              --format json \
+              --output $(Build.ArtifactStagingDirectory)/trivy-result-report.json \
+              --exit-code 0
+          displayName: 'Run Trivy Result Image Scan'
+
+        - script: |
+            trivy image votingacr123.azurecr.io/worker:$(imageTag) \
+              --format json \
+              --output $(Build.ArtifactStagingDirectory)/trivy-worker-report.json \
+              --exit-code 0
+          displayName: 'Run Trivy Worker Image Scan'
+
+        - task: PublishBuildArtifacts@1
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+            ArtifactName: 'Trivy Image Report'
+            publishLocation: 'Container'
+          displayName: ' Trivy Image Report'
+
+    - job: docker_push_image
+      displayName: 'Docker Push Image'
+      dependsOn: trivy_image_scan
+      steps:
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            repository: 'vote'
+            command: 'push'
+            tags: |
+              $(Build.BuildId)
+              latest
+          displayName: ' Push Vote Image'
+
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            repository: 'result'
+            command: 'push'
+            tags: |
+              $(Build.BuildId)
+              latest
+          displayName: ' Push Result Image'
+
+        - task: Docker@2
+          inputs:
+            containerRegistry: 'acr-voting-sc'
+            repository: 'worker'
+            command: 'push'
+            tags: |
+              $(Build.BuildId)
+              latest
+          displayName: ' Push Worker Image'
+
+    - job: update_images_in_deployments
+      displayName: 'Update Images'
+      dependsOn: docker_push_image
+      steps:
+        - script: |
+            # Clone QA branch fresh
+            git clone -b QA https://$(System.AccessToken)@dev.azure.com/shimdi247/project-1/_git/project-1 cloned-repo
+
+            # Inject build tag
+            sed -i "s|votingacr123.azurecr.io/vote:.*|votingacr123.azurecr.io/vote:$(Build.BuildId)|g" cloned-repo/k8s-yamls/qa-app_and_db/vote-deployment.yaml
+            sed -i "s|votingacr123.azurecr.io/result:.*|votingacr123.azurecr.io/result:$(Build.BuildId)|g" cloned-repo/k8s-yamls/qa-app_and_db/result-deployment.yaml
+            sed -i "s|votingacr123.azurecr.io/worker:.*|votingacr123.azurecr.io/worker:$(Build.BuildId)|g" cloned-repo/k8s-yamls/qa-app_and_db/worker-deployment.yaml
+
+            # Git config & push
+            cd cloned-repo
+            git config user.email "azure-bot@shimdi247.com"
+            git config user.name "Azure DevOps Pipeline"
+            git add k8s-yamls/
+            git commit -m "ci: update image tag to $(Build.BuildId) [skip ci]"
+            git push origin QA
+          displayName: 'Inject tag and push to QA'
+          env:
+            SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+
+    - job: docker_images_cleanup
+      displayName: 'Image cleanup'
+      dependsOn: update_images_in_deployments
+      steps:
+        - script: |
+            for IMAGE in vote result worker; do
+              echo "Cleaning old tags for $IMAGE..."
+              docker images "votingacr123.azurecr.io/$IMAGE" --format "{{.Tag}}" | \
+                sort -n | \
+                head -n -3 | \
+                xargs -I {} docker rmi "votingacr123.azurecr.io/$IMAGE:{}" || true
+            done
+          displayName: 'Cleanup old images - keep last 3 tags'
+
+- stage: kubernetes_deploy_to_qa
+  displayName: 'Deploy To QA Kubernetes'
+  dependsOn: Docker_Build_Push
+  jobs:
+
+    - job: deploy_apps_and_databases
+      displayName: 'Deploy Apps & Databases'
+      steps:
+        - task: KubernetesManifest@1
+          inputs:
+            action: 'deploy'
+            rolloutStatusTimeout: '60' 
+            connectionType: 'kubernetesServiceConnection'
+            kubernetesServiceConnection: 'aks-voting-sc'
+            namespace: 'qa'
+            manifests: 'k8s-yamls/qa-app_and_db/*.yaml'
+
+    - job: deploy_ingress
+      displayName: 'Deploy Ingress'
+      dependsOn: deploy_apps_and_databases
+      steps:
+
+        - task: KubernetesManifest@1
+          inputs:
+            action: 'deploy'
+            connectionType: 'kubernetesServiceConnection'
+            kubernetesServiceConnection: 'aks-voting-sc'
+            namespace: 'qa'
+            manifests: 'k8s-yamls/qa-ingresses/*.yaml'
