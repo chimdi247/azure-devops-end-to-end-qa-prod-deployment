@@ -219,7 +219,6 @@ stages:
             pollingTimeoutSec: '300'
 
 
-
 - stage: Docker_Build_Push
   displayName: 'Docker Build & Push'
   dependsOn: Sonarqube
@@ -337,7 +336,7 @@ stages:
       steps:
         - script: |
             # Clone QA branch fresh
-            git clone -b QA https://$(System.AccessToken)@dev.azure.com/shimdi247/project-1/_git/project-1 cloned-repo
+            git clone -b QA https://$(System.AccessToken)@dev.azure.com/teamraphael691/python-docker-app/_git/azure-devops-end-to-end-qa-prod-deployment.git cloned-repo
 
             # Inject build tag
             sed -i "s|votingacr123.azurecr.io/vote:.*|votingacr123.azurecr.io/vote:$(Build.BuildId)|g" cloned-repo/k8s-yamls/qa-app_and_db/vote-deployment.yaml
@@ -346,7 +345,7 @@ stages:
 
             # Git config & push
             cd cloned-repo
-            git config user.email "azure-bot@shimdi247.com"
+            git config user.email "azure-bot@teamraphael691.com"
             git config user.name "Azure DevOps Pipeline"
             git add k8s-yamls/
             git commit -m "ci: update image tag to $(Build.BuildId) [skip ci]"
@@ -398,3 +397,5 @@ stages:
             kubernetesServiceConnection: 'aks-voting-sc'
             namespace: 'qa'
             manifests: 'k8s-yamls/qa-ingresses/*.yaml'
+
+          
